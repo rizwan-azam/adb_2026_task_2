@@ -31,7 +31,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 # THE SOFTWARE.
 */
-
 public class Blocking {
 	public static int num_taks=30;
 	public static int num_queries_per_task = 3;
