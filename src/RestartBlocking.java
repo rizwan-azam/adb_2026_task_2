@@ -79,7 +79,7 @@ public class RestartBlocking {
 			int[] results = ps.executeBatch();
 			con.commit();
 			con.close();
-			System.out.println(Arrays.toString(results));
+			System.out.println("Inserted " + results.length + " rows.");
 		} catch (SQLException e) {
 			e.printStackTrace();
 		}
@@ -139,34 +139,71 @@ public class RestartBlocking {
 
 		@Override
 		public void run() {
-			boolean committed = false;
-			int attempts = 0;
-			while (!committed) {
-				Connection con = null;
-				try {
-					con = ConnectionFactory.getDefaultParameterConnection(ConnectionFactory.POSTGRESQL);
-					con.setAutoCommit(false);
-					con.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
-					PreparedStatement ps = con.prepareStatement(
-							"UPDATE blocking_data SET data_value = ?, modified_by = " + task +
-									" WHERE data_value >= ? AND data_value <= ?;");
+			// Keep the same update values for every retry of this task.
+			double[] updateValues = new double[num_queries_per_task];
+			for (int q = 0; q < num_queries_per_task; q++) {
+				updateValues[q] = (float) (rand.nextDouble() * max_value);
+			}
 
-					for (int q = 0; q < num_queries_per_task; q++) {
-						ps.setDouble(1, (float) (rand.nextDouble() * max_value));
-						ps.setDouble(2, start_range[q]);
-						ps.setDouble(3, stop_range[q]);
-						ps.execute();
+			int aborts = 0;
+
+			while (true) {
+				try (Connection con =
+							 ConnectionFactory.getDefaultParameterConnection(
+									 ConnectionFactory.POSTGRESQL)) {
+
+					con.setAutoCommit(false);
+					con.setTransactionIsolation(
+							Connection.TRANSACTION_READ_COMMITTED);
+
+					try {
+						String sql =
+								"UPDATE blocking_data "
+										+ "SET data_value = ?, modified_by = ? "
+										+ "WHERE data_value >= ? AND data_value <= ?";
+
+						try (PreparedStatement ps = con.prepareStatement(sql)) {
+							for (int q = 0; q < num_queries_per_task; q++) {
+								ps.setDouble(1, updateValues[q]);
+								ps.setInt(2, task);
+								ps.setDouble(3, start_range[q]);
+								ps.setDouble(4, stop_range[q]);
+								ps.executeUpdate();
+							}
+						}
+
+						con.commit();
+
+						int finished = tasks_finished.incrementAndGet();
+						System.out.println(
+								"Done task " + task + " after " + aborts
+										+ " aborts. Finisher number " + finished);
+						return;
+
+					} catch (SQLException e) {
+						try {
+							con.rollback();
+						} catch (SQLException rollbackError) {
+							e.addSuppressed(rollbackError);
+							throw e;
+						}
+
+						if (!"40P01".equals(e.getSQLState())) {
+							// Permanent errors must not cause endless retries.
+							throw e;
+						}
+
+						aborts++;
+						System.err.println(
+								"Task " + task + " deadlock abort " + aborts
+										+ "; restarting the whole transaction.");
 					}
-					con.commit();
-					committed = true;
-					int num_finished = tasks_finished.incrementAndGet();
-					System.out.println("Done task " + task + " after " + attempts + " aborts. Finisher number " + num_finished);
+
 				} catch (SQLException e) {
-					attempts++;
-					System.err.println("Task " + task + " aborted, restarting: " + e.getMessage());
-					try { if (con != null) con.rollback(); } catch (SQLException ignored) {}
-				} finally {
-					try { if (con != null) con.close(); } catch (SQLException ignored) {}
+					System.err.println(
+							"Task " + task + " stopped. SQLState="
+									+ e.getSQLState() + ": " + e.getMessage());
+					return;
 				}
 			}
 		}

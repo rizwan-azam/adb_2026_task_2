@@ -77,7 +77,7 @@ public class Blocking {
 			int[] results = ps.executeBatch();
 			con.commit();
 			con.close();
-			System.out.println(Arrays.toString(results));
+			System.out.println("Inserted " + results.length + " rows.");
 		} catch (SQLException e) {
 			e.printStackTrace();
 		}
@@ -134,34 +134,54 @@ public class Blocking {
 				start_range[q] = rand.nextDouble()*stop_range[q];
 			}
 		}
-		
+
 		@Override
 		public void run() {
-			Connection con=null;//XXX - Yes there needs to be a separate Connection per blocking taks. Otherwise strange things can happen
-			con = ConnectionFactory.getDefaultParameterConnection(ConnectionFactory.POSTGRESQL);//XXX This is the class you need to create, but does not have to be in the Repo
-			PreparedStatement ps;
-			
-			try {	
+			try (Connection con =
+						 ConnectionFactory.getDefaultParameterConnection(
+								 ConnectionFactory.POSTGRESQL)) {
+
 				con.setAutoCommit(false);
 				con.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
-				int q = 0;
-				ps = con.prepareStatement("UPDATE blocking_data SET data_value = ?,  modified_by = "+task+" WHERE data_value >= ? AND data_value <= ?;",ResultSet.TYPE_SCROLL_SENSITIVE, ResultSet.CONCUR_UPDATABLE);
-				
-				while(q<num_queries_per_task) {//I want to execute num_queries_per_task update queries
-					ps.setDouble(1, (float) (rand.nextDouble()*max_value));//some value, which one is not important.
-					ps.setDouble(2, start_range[q]);
-					ps.setDouble(3, stop_range[q]);
-					//System.out.println("Started query "+q+" task "+task+" Executing "+ps);
-					ps.execute();
-					q++;
-				}		
-				con.commit();
-				int num_finished = tasks_finished.incrementAndGet();
-				con.close();
-				System.out.println("Done task "+task+". I am finisher number "+num_finished);
+
+				try {
+					String sql =
+							"UPDATE blocking_data SET data_value = ?, modified_by = ? "
+									+ "WHERE data_value >= ? AND data_value <= ?";
+
+					try (PreparedStatement ps = con.prepareStatement(sql)) {
+						for (int q = 0; q < num_queries_per_task; q++) {
+							ps.setDouble(1, (float) (rand.nextDouble() * max_value));
+							ps.setInt(2, task);
+							ps.setDouble(3, start_range[q]);
+							ps.setDouble(4, stop_range[q]);
+							ps.executeUpdate();
+						}
+					}
+
+					con.commit();
+					int finished = tasks_finished.incrementAndGet();
+					System.out.println(
+							"Done task " + task
+									+ ". I am finisher number " + finished);
+
+				} catch (SQLException e) {
+					try {
+						con.rollback();
+					} catch (SQLException rollbackError) {
+						e.addSuppressed(rollbackError);
+					}
+
+					System.err.println(
+							"Task " + task + " SQLState=" + e.getSQLState()
+									+ ": " + e.getMessage());
+				}
+
 			} catch (SQLException e) {
-				System.err.println("Task "+task+" "+e.getMessage());
+				System.err.println(
+						"Task " + task + " connection/setup/close error: "
+								+ e.getMessage());
 			}
-		}	
+		}
 	}
 }

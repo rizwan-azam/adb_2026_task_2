@@ -8,7 +8,7 @@ import java.util.Random;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.atomic.AtomicInteger;
-
+import java.util.concurrent.locks.ReentrantLock;
 /**
  * 
  * @author Martin Schaeler martin.schaeler@plus.ac.at
@@ -33,6 +33,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 */
 
 public class NoLiveLocks {
+	private static final ReentrantLock transactionLock =
+			new ReentrantLock(true);
 	public static int num_taks=100;
 	public static int num_queries_per_task = 6;
 	Connection con;
@@ -78,7 +80,7 @@ public class NoLiveLocks {
 			int[] results = ps.executeBatch();
 			con.commit();
 			con.close();
-			System.out.println(Arrays.toString(results));
+			System.out.println("Inserted " + results.length + " rows.");
 		} catch (SQLException e) {
 			e.printStackTrace();
 		}
@@ -138,56 +140,77 @@ public class NoLiveLocks {
 
 		@Override
 		public void run() {
-			// One SELECT that locks the union of all this task's ranges, in data_id order
-			StringBuilder sb = new StringBuilder("SELECT data_id FROM blocking_data WHERE ");
+			double[] updateValues = new double[num_queries_per_task];
 			for (int q = 0; q < num_queries_per_task; q++) {
-				if (q > 0) sb.append(" OR ");
-				sb.append("(data_value >= ? AND data_value <= ?)");
+				updateValues[q] = (float) (rand.nextDouble() * max_value);
 			}
-			sb.append(" ORDER BY data_id FOR UPDATE");
-			String lockSql = sb.toString();
 
-			int attempts = 0;
-			boolean committed = false;
-			while (!committed) {
-				Connection con = null;
+			int aborts = 0;
+
+			while (true) {
+				// All tasks use the same fair lock.
+				transactionLock.lock();
+
 				try {
-					con = ConnectionFactory.getDefaultParameterConnection(ConnectionFactory.POSTGRESQL);
-					con.setAutoCommit(false);
-					con.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+					try (Connection con =
+								 ConnectionFactory.getDefaultParameterConnection(
+										 ConnectionFactory.POSTGRESQL)) {
 
-					// Step 1: lock all needed rows in the same global order (by data_id)
-					PreparedStatement lockPs = con.prepareStatement(lockSql);
-					for (int q = 0; q < num_queries_per_task; q++) {
-						lockPs.setDouble(2 * q + 1, start_range[q]);
-						lockPs.setDouble(2 * q + 2, stop_range[q]);
-					}
-					lockPs.executeQuery().close();
-					lockPs.close();
+						con.setAutoCommit(false);
+						con.setTransactionIsolation(
+								Connection.TRANSACTION_READ_COMMITTED);
 
-					// Step 2: do the actual updates (rows are already locked by us)
-					PreparedStatement ps = con.prepareStatement(
-							"UPDATE blocking_data SET data_value = ?, modified_by = " + task +
-									" WHERE data_value >= ? AND data_value <= ?;");
-					for (int q = 0; q < num_queries_per_task; q++) {
-						ps.setDouble(1, (float) (rand.nextDouble() * max_value));
-						ps.setDouble(2, start_range[q]);
-						ps.setDouble(3, stop_range[q]);
-						ps.execute();
+						try {
+							String sql =
+									"UPDATE blocking_data "
+											+ "SET data_value = ?, modified_by = ? "
+											+ "WHERE data_value >= ? AND data_value <= ?";
+
+							try (PreparedStatement ps = con.prepareStatement(sql)) {
+								for (int q = 0; q < num_queries_per_task; q++) {
+									ps.setDouble(1, updateValues[q]);
+									ps.setInt(2, task);
+									ps.setDouble(3, start_range[q]);
+									ps.setDouble(4, stop_range[q]);
+									ps.executeUpdate();
+								}
+							}
+
+							con.commit();
+
+							int finished = tasks_finished.incrementAndGet();
+							System.out.println(
+									"Done task " + task + " after " + aborts
+											+ " aborts. Finisher number " + finished);
+							return;
+
+						} catch (SQLException e) {
+							try {
+								con.rollback();
+							} catch (SQLException rollbackError) {
+								e.addSuppressed(rollbackError);
+								throw e;
+							}
+
+							if (!"40P01".equals(e.getSQLState())) {
+								throw e;
+							}
+
+							aborts++;
+							System.err.println(
+									"Task " + task + " deadlock abort " + aborts
+											+ "; restarting the whole transaction.");
+						}
+
+					} catch (SQLException e) {
+						System.err.println(
+								"Task " + task + " stopped. SQLState="
+										+ e.getSQLState() + ": " + e.getMessage());
+						return;
 					}
-					con.commit();
-					committed = true;
-					int num_finished = tasks_finished.incrementAndGet();
-					System.out.println("Done task " + task + " after " + attempts + " aborts. Finisher number " + num_finished);
-				} catch (SQLException e) {
-					attempts++;
-					System.err.println("Task " + task + " aborted, restarting: " + e.getMessage());
-					try { if (con != null) con.rollback(); } catch (SQLException ignored) {}
-					try { // short random backoff before retrying
-						Thread.sleep(java.util.concurrent.ThreadLocalRandom.current().nextInt(10, 50 * attempts + 10));
-					} catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
 				} finally {
-					try { if (con != null) con.close(); } catch (SQLException ignored) {}
+					// Runs even when the method returns or an error occurs.
+					transactionLock.unlock();
 				}
 			}
 		}
