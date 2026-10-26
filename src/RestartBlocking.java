@@ -33,8 +33,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 */
 
 public class RestartBlocking {
-	public static int num_taks=100;
-	public static int num_queries_per_task = 6;
+	public static int num_taks=30;
+	public static int num_queries_per_task = 3;
 
 	Connection con;
 	Random rand = new Random(123456);

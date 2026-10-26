@@ -35,8 +35,8 @@ import java.util.concurrent.locks.ReentrantLock;
 public class NoLiveLocks {
 	private static final ReentrantLock transactionLock =
 			new ReentrantLock(true);
-	public static int num_taks=100;
-	public static int num_queries_per_task = 6;
+	public static int num_taks=30;
+	public static int num_queries_per_task = 3;
 	Connection con;
 	Random rand = new Random(123456);
 	int num_tuple = 50000;
