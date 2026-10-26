@@ -2,7 +2,7 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.util.Properties;
-
+/*update 26/10/2026*/
 public class ConnectionFactory {
     public static final int POSTGRESQL = 1;
 
